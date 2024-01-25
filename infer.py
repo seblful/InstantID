@@ -3,13 +3,15 @@ import torch
 import numpy as np
 from PIL import Image
 
+from diffusers import LCMScheduler
 from diffusers.utils import load_image
 from diffusers.models import ControlNetModel
 
 from insightface.app import FaceAnalysis
 from pipeline_stable_diffusion_xl_instantid import StableDiffusionXLInstantIDPipeline, draw_kps
 
-def resize_img(input_image, max_side=1280, min_side=1024, size=None, 
+
+def resize_img(input_image, max_side=1280, min_side=1024, size=None,
                pad_to_max_side=False, mode=Image.BILINEAR, base_pixel_number=64):
 
     w, h = input_image.size
@@ -19,23 +21,27 @@ def resize_img(input_image, max_side=1280, min_side=1024, size=None,
         ratio = min_side / min(h, w)
         w, h = round(ratio*w), round(ratio*h)
         ratio = max_side / max(h, w)
-        input_image = input_image.resize([round(ratio*w), round(ratio*h)], mode)
-        w_resize_new = (round(ratio * w) // base_pixel_number) * base_pixel_number
-        h_resize_new = (round(ratio * h) // base_pixel_number) * base_pixel_number
+        input_image = input_image.resize(
+            [round(ratio*w), round(ratio*h)], mode)
+        w_resize_new = (round(ratio * w) // base_pixel_number) * \
+            base_pixel_number
+        h_resize_new = (round(ratio * h) // base_pixel_number) * \
+            base_pixel_number
     input_image = input_image.resize([w_resize_new, h_resize_new], mode)
 
     if pad_to_max_side:
         res = np.ones([max_side, max_side, 3], dtype=np.uint8) * 255
         offset_x = (max_side - w_resize_new) // 2
         offset_y = (max_side - h_resize_new) // 2
-        res[offset_y:offset_y+h_resize_new, offset_x:offset_x+w_resize_new] = np.array(input_image)
+        res[offset_y:offset_y+h_resize_new, offset_x:offset_x +
+            w_resize_new] = np.array(input_image)
         input_image = Image.fromarray(res)
     return input_image
 
 
-if __name__ == "__main__":
-
-    app = FaceAnalysis(name='antelopev2', root='./', providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
+def main():
+    app = FaceAnalysis(name='buffalo_l', root='./',
+                       providers=['CUDAExecutionProvider', 'CPUExecutionProvider'])
     app.prepare(ctx_id=0, det_size=(640, 640))
 
     # Path to InstantID models
@@ -43,9 +49,11 @@ if __name__ == "__main__":
     controlnet_path = f'./checkpoints/ControlNetModel'
 
     # Load pipeline
-    controlnet = ControlNetModel.from_pretrained(controlnet_path, torch_dtype=torch.float16)
+    controlnet = ControlNetModel.from_pretrained(
+        controlnet_path, torch_dtype=torch.float16)
 
     base_model_path = 'stabilityai/stable-diffusion-xl-base-1.0'
+    lcm_lora_path = "./checkpoints/pytorch_lora_weights.safetensors"
 
     pipe = StableDiffusionXLInstantIDPipeline.from_pretrained(
         base_model_path,
@@ -55,6 +63,13 @@ if __name__ == "__main__":
     pipe.cuda()
     pipe.load_ip_adapter_instantid(face_adapter)
 
+    pipe.load_lora_weights(lcm_lora_path)
+    pipe.fuse_lora()
+    pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
+
+    num_inference_steps = 5
+    guidance_scale = 0.5
+
     prompt = "analog film photo of a man. faded film, desaturated, 35mm photo, grainy, vignette, vintage, Kodachrome, Lomography, stained, highly detailed, found footage, masterpiece, best quality"
     n_prompt = "(lowres, low quality, worst quality:1.2), (text:1.2), watermark, painting, drawing, illustration, glitch, deformed, mutated, cross-eyed, ugly, disfigured (lowres, low quality, worst quality:1.2), (text:1.2), watermark, painting, drawing, illustration, glitch,deformed, mutated, cross-eyed, ugly, disfigured"
 
@@ -62,7 +77,8 @@ if __name__ == "__main__":
     face_image = resize_img(face_image)
 
     face_info = app.get(cv2.cvtColor(np.array(face_image), cv2.COLOR_RGB2BGR))
-    face_info = sorted(face_info, key=lambda x:(x['bbox'][2]-x['bbox'][0])*x['bbox'][3]-x['bbox'][1])[-1] # only use the maximum face
+    face_info = sorted(face_info, key=lambda x: (
+        x['bbox'][2]-x['bbox'][0])*x['bbox'][3]-x['bbox'][1])[-1]  # only use the maximum face
     face_emb = face_info['embedding']
     face_kps = draw_kps(face_image, face_info['kps'])
 
@@ -78,3 +94,7 @@ if __name__ == "__main__":
     ).images[0]
 
     image.save('result.jpg')
+
+
+if __name__ == "__main__":
+    main()
